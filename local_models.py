@@ -121,6 +121,8 @@ class ModelSpec:
     vision: bool = False
     coding: bool = False
     note: str = ""
+    # Шаблон поиска mmproj-файла (проектор зрения) в том же репо.
+    mmproj_pattern: str = "mmproj"
 
     def fit(self, hw: Hardware) -> tuple[bool, str]:
         """Подходит ли модель под это железо и почему."""
@@ -136,6 +138,30 @@ class ModelSpec:
         if hw.cuda_available:
             return True, "часть слоёв в RAM — будет работать, но медленнее"
         return True, "только CPU — отвечает медленно"
+
+    @property
+    def badges(self) -> str:
+        """Короткие метки для интерфейса."""
+        parts = []
+        if self.vision:
+            parts.append("👁 Зрение")
+        if self.uncensored:
+            parts.append("🔓 Без цензуры")
+        if self.coding:
+            parts.append("💻 Код")
+        return " · ".join(parts)
+
+    @property
+    def badges(self) -> str:
+        """Короткие метки для интерфейса."""
+        parts = []
+        if self.vision:
+            parts.append("👁 Зрение")
+        if self.uncensored:
+            parts.append("🔓 Без цензуры")
+        if self.coding:
+            parts.append("💻 Код")
+        return " · ".join(parts)
 
 
 CATALOG: list[ModelSpec] = [
@@ -174,17 +200,45 @@ CATALOG: list[ModelSpec] = [
         filename="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf", size_gb=4.9,
         note="Классика для агентских задач, нужна видеокарта от 6 ГБ.",
     ),
+    # --- ЗРЕНИЕ (vision) ---
     ModelSpec(
-        key="gemma4b", title="Gemma 3 4B · Q4_K_M", repo="unsloth/gemma-3-4b-it-GGUF",
+        key="qwen25vl3b", title="Qwen2.5-VL 3B · Q4_K_M (зрение)",
+        repo="Qwen/Qwen2.5-VL-3B-Instruct-GGUF",
         quant="Q4_K_M", size_gb=2.1, vision=True,
-        note="Мультимодальная (может смотреть на снимок экрана).",
+        note="Лёгкая модель со зрением: читает скриншоты, понимает текст на картинке.",
     ),
+    ModelSpec(
+        key="qwen25vl7b", title="Qwen2.5-VL 7B · Q4_K_M (зрение)",
+        repo="Qwen/Qwen2.5-VL-7B-Instruct-GGUF",
+        quant="Q4_K_M", size_gb=4.7, vision=True,
+        note="Лучшая лёгкая модель со зрением: скриншоты, OCR, таблицы, UI. 16 ГБ VRAM — идеально.",
+    ),
+    ModelSpec(
+        key="gemma4b", title="Gemma 3 4B · Q4_K_M (зрение)",
+        repo="unsloth/gemma-3-4b-it-GGUF",
+        quant="Q4_K_M", size_gb=2.1, vision=True,
+        note="Мультимодальная от Google. Понимает русский, видит картинки.",
+    ),
+    ModelSpec(
+        key="llava7b", title="LLaVA 1.6 Mistral 7B · Q4_K_M (зрение)",
+        repo="ggml-org/llava-v1.6-mistral-7b-gguf",
+        quant="Q4_K_M", size_gb=4.4, vision=True,
+        note="Классическая vision-модель. Русский ограничен, но скриншоты понимает.",
+    ),
+    ModelSpec(
+        key="minicpm3", title="MiniCPM-V 2.6 · Q4_K_M (зрение)",
+        repo="openbmb/MiniCPM-V-2_6-gguf",
+        quant="Q4_K_M", size_gb=4.8, vision=True,
+        note="9.6B-параметров, отлично читает текст на скриншотах, русский OK.",
+    ),
+    # --- КОДИНГ ---
     ModelSpec(
         key="qwen_coder", title="Qwen2.5 Coder 7B · Q4_K_M",
         repo="Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
         filename="qwen2.5-coder-7b-instruct-q4_k_m.gguf", size_gb=4.5, coding=True,
         note="Специальная модель для кодинга — её удобно ставить кодинг-моделью.",
     ),
+    # --- БЕЗ ЦЕНЗУРЫ ---
     ModelSpec(
         key="dolphin3b", title="Dolphin 3 Llama 3.2 3B · Q4_K_M (без цензуры)",
         repo="bartowski/Dolphin3-Llama3.2-3B-GGUF", quant="Q4_K_M", size_gb=2.0,
@@ -193,13 +247,25 @@ CATALOG: list[ModelSpec] = [
     ModelSpec(
         key="qwen_abliterated", title="Qwen3 8B Abliterated · Q4_K_M (без цензуры)",
         repo="mradermacher/Qwen3-8B-Abliterated-GGUF", quant="Q4_K_M", size_gb=4.7,
-        uncensored=True, note="Снятый отказ,Good русский, нужна видеокарта от 6 ГБ.",
+        uncensored=True, note="Снятый отказ, хороший русский, нужна видеокарта от 6 ГБ.",
     ),
     ModelSpec(
         key="llama32_uncensored", title="Llama 3.2 3B Uncensored · Q4_K_M (без цензуры)",
         repo="mradermacher/Llama-3.2-3B-Instruct-Uncensored-GGUF",
         filename="Llama-3.2-3B-Instruct-uncensored.Q4_K_M.gguf", size_gb=2.0,
         uncensored=True, note="Компактная модель без фильтров.",
+    ),
+    ModelSpec(
+        key="dolphin8b", title="Dolphin 2.9 Llama 3 8B · Q4_K_M (без цензуры)",
+        repo="bartowski/Dolphin-2.9-llama3-8b-GGUF", quant="Q4_K_M", size_gb=4.7,
+        uncensored=True, note="Мощная безотказная модель, агентский уровень.",
+    ),
+    ModelSpec(
+        key="qwen25vl7b_abliterated",
+        title="Qwen2.5-VL 7B Abliterated · Q4_K_M (зрение + без цензуры)",
+        repo="mradermacher/Qwen2.5-VL-7B-Instruct-abliterated-GGUF",
+        quant="Q4_K_M", size_gb=4.7, vision=True, uncensored=True,
+        note="Идеальная для Джарвиса: видит скриншоты И не отказывает.",
     ),
 ]
 
@@ -425,6 +491,31 @@ def model_url(repo: str, filename: str) -> str:
     return f"{HF_BASE}/{repo.strip().strip('/')}/resolve/main/{filename}"
 
 
+def find_mmproj(repo: str, quant: str = "Q4_K_M") -> str:
+    """Ищет mmproj-файл в репозитории: Q8_0 > F16 > любой."""
+    url = f"{HF_BASE}/api/models/{repo.strip().strip('/')}/tree/main"
+    try:
+        response = requests.get(url, timeout=(10, 30))
+        if response.status_code != 200:
+            return ""
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return ""
+    candidates: list[str] = []
+    for item in data if isinstance(data, list) else []:
+        name = str(item.get("path", ""))
+        if "mmproj" in name.lower() and name.lower().endswith(".gguf"):
+            candidates.append(name)
+    if not candidates:
+        return ""
+    # Приоритет: F16 (качество), Q8_0 (баланс), остальное.
+    for priority in ("F16", "Q8_0", "Q4_K_M", "Q4_K_S"):
+        for name in candidates:
+            if priority in name.upper():
+                return name
+    return candidates[0]
+
+
 def download_model(
     spec: ModelSpec,
     directory: Path,
@@ -436,7 +527,20 @@ def download_model(
     if not filename:
         raise RuntimeError(f"В репозитории {spec.repo} нет gguf-файла")
     target = directory / filename
-    return download_file(model_url(spec.repo, filename), target, threads, on_progress, cancel)
+    result = download_file(model_url(spec.repo, filename), target, threads, on_progress, cancel)
+    # Для vision-моделей скачиваем mmproj (проектор изображений).
+    if spec.vision:
+        mmproj_name = find_mmproj(spec.repo, spec.quant)
+        if mmproj_name:
+            mmproj_target = directory / mmproj_name
+            if not mmproj_target.exists():
+                if on_progress:
+                    on_progress("Проектор зрения", 0.02, mmproj_name)
+                download_file(
+                    model_url(spec.repo, mmproj_name), mmproj_target,
+                    threads=4, on_progress=None, cancel=cancel,
+                )
+    return result
 
 
 def download_repo_file(
@@ -582,6 +686,10 @@ class LocalServer:
                 "--threads", str(max(4, hw.cpu_cores // 2)),
                 "--no-webui",
             ]
+            # Ищем mmproj рядом с моделью — если он есть, включаем зрение.
+            mmproj = _find_mmproj_for_model(path)
+            if mmproj is not None:
+                args.extend(["--mmproj", str(mmproj)])
             if on_progress:
                 on_progress("Запуск модели", 0.98, path.name)
             self.process = subprocess.Popen(
@@ -600,7 +708,8 @@ class LocalServer:
                 )
             if self.running():
                 if on_progress:
-                    on_progress("Модель готова", 1.0, path.name)
+                    vision_note = " + зрение" if mmproj else ""
+                    on_progress("Модель готова", 1.0, path.name + vision_note)
                 return
             time.sleep(1.0)
         raise RuntimeError("модель не успела загрузиться за 3 минуты")
