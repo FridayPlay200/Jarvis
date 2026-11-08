@@ -792,11 +792,24 @@ class AIManager:
         "gpt-4o", "gpt-4.1", "gpt-4-vision", "o1", "o3", "o4", "claude",
         "gemini", "qwen-vl", "qwen2.5-vl", "llava", "vision", "minicpm-v",
         "glm-4v", "internvl", "pixtral", "kimi-vision", "grok-4",
+        "gemma-3", "gemma3", "moondream",
+    )
+    # Для локальных GGUF смотрим по имени файла модели.
+    _LOCAL_VISION_MARKERS = (
+        "-vl", "_vl", "vl-", "vision", "llava", "minicpm", "gemma-3",
+        "gemma3", "moondream", "internvl", "pixtral", "qwen3-vl",
     )
 
     def _model_supports_vision(self) -> bool:
         model = (self.settings.model or "").lower()
-        return any(marker in model for marker in self._VISION_MARKERS)
+        if any(marker in model for marker in self._VISION_MARKERS):
+            return True
+        # Локальная модель: имя в настройках — «local-model», поэтому
+        # смотрим на имя скачанного .gguf-файла.
+        path_name = (getattr(self.settings, "local_model_path", "") or "").lower()
+        if path_name and any(marker in path_name for marker in self._LOCAL_VISION_MARKERS):
+            return True
+        return False
 
     def _image_message(
         self, tool_result: str, is_anthropic: bool

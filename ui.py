@@ -1087,8 +1087,19 @@ class SettingsDialog(QDialog):
         cat_group = QGroupBox("Модели, которые потянет этот компьютер")
         cat_layout = QVBoxLayout(cat_group)
 
+        # Поиск
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Поиск"))
+        self.local_search_edit = QLineEdit()
+        self.local_search_edit.setPlaceholderText(
+            "qwen, vision, dolphin, llama, без цензуры..."
+        )
+        self.local_search_edit.textChanged.connect(self._refresh_local_catalog)
+        search_row.addWidget(self.local_search_edit, 1)
+        cat_layout.addLayout(search_row)
+
         filters = QHBoxLayout()
-        self.local_show_all_check = QCheckBox("Показывать все (не только подходящие)")
+        self.local_show_all_check = QCheckBox("Показывать все")
         self.local_show_all_check.setChecked(bool(self.settings.local_show_all))
         self.local_show_all_check.stateChanged.connect(self._refresh_local_catalog)
         self.local_uncensored_check = QCheckBox("Только без цензуры")
@@ -1096,7 +1107,11 @@ class SettingsDialog(QDialog):
             bool(self.settings.local_uncensored_only)
         )
         self.local_uncensored_check.stateChanged.connect(self._refresh_local_catalog)
+        self.local_vision_check = QCheckBox("Только со зрением")
+        self.local_vision_check.stateChanged.connect(self._refresh_local_catalog)
         filters.addWidget(self.local_show_all_check)
+        filters.addWidget(self.local_uncensored_check)
+        filters.addWidget(self.local_vision_check)
         filters.addStretch(1)
         cat_layout.addLayout(filters)
 
@@ -1281,23 +1296,58 @@ class SettingsDialog(QDialog):
         hw = self._local_hw_info()
         show_all = self.local_show_all_check.isChecked()
         only_uncensored = self.local_uncensored_check.isChecked()
-        self._local_catalog = local_models.catalog_for(hw, show_all, only_uncensored)
+        only_vision = self.local_vision_check.isChecked()
+        query = self.local_search_edit.text().strip().lower()
+        rows = local_models.catalog_for(hw, show_all, only_uncensored)
+        if only_vision:
+            rows = [row for row in rows if row[0].vision]
+        if query:
+            rows = [row for row in rows if self._model_matches(row[0], query)]
+        self._local_catalog = rows
         self.local_model_list.clear()
         for spec, fits, reason in self._local_catalog:
-            mark = "" if fits else "  ⚠ не рекомендуется"
-            tags = []
-            if spec.uncensored:
-                tags.append("без цензуры")
+            mark = "" if fits else "  ⚠ не потянет"
+            # Значки прямо в строке: видно, кто видит скриншоты и кто без отказов.
+            badges = []
             if spec.vision:
-                tags.append("зрение")
+                badges.append("👁 видит скриншоты")
+            else:
+                badges.append("⬛ текст без зрения")
+            if spec.uncensored:
+                badges.append("🔓 без цензуры")
             if spec.coding:
-                tags.append("кодинг")
-            tag = f"  [{', '.join(tags)}]" if tags else ""
+                badges.append("💻 код")
+            tag = f"  [{'] [' .join(badges)}]" if badges else ""
             item = QListWidgetItem(f"{spec.title}  ·  {spec.size_gb:.1f} ГБ{mark}{tag}")
             item.setData(Qt.UserRole, spec.key)
+            if not fits:
+                item.setForeground(QColor("#e0a03c"))
             self.local_model_list.addItem(item)
         if not self._local_catalog:
-            self.local_model_list.addItem("Нет моделей под это железо — включите «Показывать все»")
+            hint = "Ни одна модель не подошла — включите «Показывать все»"
+            if query:
+                hint = f"По запросу «{query}» ничего не найдено"
+            self.local_model_list.addItem(hint)
+
+    @staticmethod
+    def _model_matches(spec, query: str) -> bool:
+        """Поиск по названию, репозиторию, описанию и русским ключевым словам."""
+        haystack = " ".join(
+            (spec.key, spec.title, spec.repo, spec.note, spec.quant)
+        ).lower()
+        words = [word for word in query.replace(",", " ").split() if word]
+        for word in words:
+            if word in haystack:
+                continue
+            # Русские синонимы: пользователь ищет словами, а не тэгами.
+            if word in ("зрение", "зрения", "скрин", "скрины", "скриншот", "фото", "картинк") and spec.vision:
+                continue
+            if word in ("цензур", "безотказ", "abliterated", "uncensored") and spec.uncensored:
+                continue
+            if word in ("код", "кода", "кодинг", "программ") and spec.coding:
+                continue
+            return False
+        return True
 
     def _on_local_model_selected(self, current, _previous=None) -> None:
         if not current or not hasattr(self, "_local_catalog"):
@@ -1311,10 +1361,19 @@ class SettingsDialog(QDialog):
         hw = self._local_hw_info()
         lines = [
             f"<b>{spec.title}</b>",
-            f"Реппозиторий: {spec.repo}",
+            f"Репозиторий: {spec.repo}",
             f"Размер файла: ~{spec.size_gb:.1f} ГБ · нужно памяти: ~{spec.size_gb * 1.15 + 2:.1f} ГБ "
             f"(у вас RAM {hw.ram_gb:.0f} ГБ, VRAM {hw.vram_gb:.0f} ГБ)",
         ]
+        if spec.vision:
+            lines.append(
+                "👁 <b>Видит скриншоты</b> — вместе с моделью скачается проектор "
+                "mmproj, Джарвис сможет смотреть на экран глазами этой модели."
+            )
+        else:
+            lines.append("⬛ Текст без зрения — скриншоты эта модель не увидит.")
+        if spec.uncensored:
+            lines.append("🔓 Отказы сняты — выполняет любые команды.")
         if spec.note:
             lines.append(spec.note)
         if reason:
@@ -1538,11 +1597,20 @@ class SettingsDialog(QDialog):
     def _on_local_done_server(self, ok: bool, message: str) -> None:
         self.local_start_button.setEnabled(True)
         self.local_ollama_button.setEnabled(True)
-        if ok:
-            self.local_status_label.setText(message)
-            self.local_server_running = True
-        else:
-            self.local_status_label.setText(message)
+        self.local_status_label.setText(message)
+        if not ok:
+            return
+        self.local_server_running = True
+        # Владелец сам нажал «Запустить» — переводим Джарвиса на эту модель.
+        path = self.local_path_edit.text().strip()
+        self.settings.local_model_path = path
+        self.settings.provider = "localgguf"
+        self.settings.model = "local-model"
+        self.settings.base_urls["localgguf"] = local_models.get_server().base_url
+        vision = " со зрением" if local_models._find_mmproj_for_model(Path(path)) else ""
+        self.local_status_label.setText(
+            f"{message}{vision}. Модель выбрана основной — можно выключать интернет."
+        )
 
     def _collect_local(self, settings: Settings) -> None:
         settings.local_threads = int(self.local_threads_spin.value())

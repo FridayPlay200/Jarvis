@@ -548,6 +548,96 @@ def download_model(
                     threads=4, on_progress=None, cancel=cancel,
                 )
     return result
+
+
+def download_repo_file(
+    repo: str,
+    filename: str,
+    directory: Path,
+    threads: int = 8,
+    on_progress: Progress | None = None,
+    cancel: threading.Event | None = None,
+) -> Path:
+    """Загрузка любого файла с Hugging Face — в том числе чужих репозиториев."""
+    return download_file(model_url(repo, filename), directory / filename, threads, on_progress, cancel)
+
+
+# ---------------------------------------------------------------------------
+# llama.cpp: скачивание сервера и запуск
+# ---------------------------------------------------------------------------
+
+def runtime_dir() -> Path:
+    """Папка рантайма рядом с приложением (в exe — внутри dist)."""
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).resolve().parent
+    return base / "runtime" / "llama.cpp"
+
+
+def server_binary(hw: Hardware | None = None) -> Path | None:
+    directory = runtime_dir()
+    for name in ("llama-server.exe", "llama-server"):
+        found = directory / name
+        if found.exists():
+            return found
+    return None
+
+
+def _github_latest_release() -> tuple[str, dict[str, str]]:
+    """(tag, {имя ассета: url}) последнего релиза llama.cpp."""
+    response = requests.get(
+        "https://api.github.com/repos/ggml-org/llama.cpp/releases",
+        params={"per_page": 10},
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=(10, 30),
+    )
+    response.raise_for_status()
+    for release in response.json():
+        assets = {
+            str(a.get("name", "")): str(a.get("browser_download_url", ""))
+            for a in release.get("assets", [])
+        }
+        wanted = [name for name in assets if name.startswith("llama-") and "bin-win" in name]
+        if wanted:
+            return str(release.get("tag_name", "")), assets
+    raise RuntimeError("на GitHub не нашлось Windows-сборки llama.cpp")
+
+
+def ensure_runtime(
+    hw: Hardware,
+    on_progress: Progress | None = None,
+    cancel: threading.Event | None = None,
+) -> Path:
+    """Скачивает бинарник llama-server (CUDA, если есть карта, иначе CPU)."""
+    existing = server_binary(hw)
+    if existing is not None:
+        return existing
+
+    directory = runtime_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    tag, assets = _github_latest_release()
+    if hw.cuda_available:
+        candidates = [name for name in assets if "bin-win-cuda" in name and "x64" in name]
+    else:
+        candidates = [name for name in assets if "bin-win-cpu-x64" in name]
+    if not candidates:
+        candidates = [name for name in assets if "bin-win-cpu-x64" in name]
+    if not candidates:
+        raise RuntimeError(f"в релизе {tag} нет подходящего архива для Windows")
+    asset = sorted(candidates)[-1]
+    url = assets[asset]
+
+    archive = directory / asset
+    download_file(url, archive, threads=6, on_progress=on_progress, cancel=cancel)
+
+    if on_progress:
+        on_progress("Распаковка", 0.95, asset)
+    with zipfile.ZipFile(archive) as handle:
+        handle.extractall(directory)
+    archive.unlink(missing_ok=True)
+
+    exe = server_binary(hw)
     if exe is None:
         raise RuntimeError("после распаковки не найден llama-server.exe")
     return exe
