@@ -1,0 +1,63 @@
+# --- Настройки с секретами -------------------------------------------
+config.json
+
+# --- Собранный exe ---------------------------------------------------
+dist/
+dist_new/
+build/
+*.spec
+*.egg-info/
+
+# --- Локальные модели и кэш (много ГБ) ------------------------------
+models/
+runtime/
+assets/offline/voice_cache/
+assets/offline/*.wav
+
+# --- Логи и дампы ----------------------------------------------------
+logs/
+logs/*
+*.log
+*.log.*
+crash.log
+
+# --- Снимки экрана и чаты --------------------------------------------
+screenshots/
+chats/
+
+# --- Временные файлы -------------------------------------------------
+*.tmp
+*.pyc
+__pycache__/
+**/__pycache__/
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# --- IDE ------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+
+# --- Python -----------------------------------------------------------
+python311/
+python311.zip
+python.exe
+pythonw.exe
+Scripts/
+Include/
+Lib/
+tcl/
+msvcp140.dll
+vcruntime140.dll
+vcruntime140_1.dll
+
+# --- OS ---------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
