@@ -804,11 +804,22 @@ class AIManager:
         model = (self.settings.model or "").lower()
         if any(marker in model for marker in self._VISION_MARKERS):
             return True
-        # Локальная модель: имя в настройках — «local-model», поэтому
-        # смотрим на имя скачанного .gguf-файла.
-        path_name = (getattr(self.settings, "local_model_path", "") or "").lower()
-        if path_name and any(marker in path_name for marker in self._LOCAL_VISION_MARKERS):
-            return True
+        # Локальная модель: имя в настройках — «local-model», поэтому смотрим
+        # на скачанный .gguf. Надёжнее имени файла — проектор рядом: его
+        # не назвать угаданием (MiniCPM лежит в файле ggml-model-Q4_K_M.gguf).
+        path_name = (getattr(self.settings, "local_model_path", "") or "").strip()
+        if path_name:
+            lowered = path_name.lower()
+            if any(marker in lowered for marker in self._LOCAL_VISION_MARKERS):
+                return True
+            try:
+                from local_models import _find_mmproj_for_model
+                from pathlib import Path as _Path
+
+                if _find_mmproj_for_model(_Path(path_name)) is not None:
+                    return True
+            except Exception:
+                pass
         return False
 
     def _image_message(

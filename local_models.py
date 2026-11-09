@@ -151,18 +151,6 @@ class ModelSpec:
             parts.append("💻 Код")
         return " · ".join(parts)
 
-    @property
-    def badges(self) -> str:
-        """Короткие метки для интерфейса."""
-        parts = []
-        if self.vision:
-            parts.append("👁 Зрение")
-        if self.uncensored:
-            parts.append("🔓 Без цензуры")
-        if self.coding:
-            parts.append("💻 Код")
-        return " · ".join(parts)
-
 
 CATALOG: list[ModelSpec] = [
     ModelSpec(
@@ -203,14 +191,16 @@ CATALOG: list[ModelSpec] = [
     # --- ЗРЕНИЕ (vision) ---
     ModelSpec(
         key="qwen25vl3b", title="Qwen2.5-VL 3B · Q4_K_M (зрение)",
-        repo="Qwen/Qwen2.5-VL-3B-Instruct-GGUF",
-        quant="Q4_K_M", size_gb=2.1, vision=True,
+        repo="ggml-org/Qwen2.5-VL-3B-Instruct-GGUF",
+        filename="Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+        size_gb=1.8, vision=True,
         note="Лёгкая модель со зрением: читает скриншоты, понимает текст на картинке.",
     ),
     ModelSpec(
         key="qwen25vl7b", title="Qwen2.5-VL 7B · Q4_K_M (зрение)",
-        repo="Qwen/Qwen2.5-VL-7B-Instruct-GGUF",
-        quant="Q4_K_M", size_gb=4.7, vision=True,
+        repo="ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
+        filename="Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+        size_gb=4.4, vision=True,
         note="Лучшая лёгкая модель со зрением: скриншоты, OCR, таблицы, UI. 16 ГБ VRAM — идеально.",
     ),
     ModelSpec(
@@ -220,15 +210,16 @@ CATALOG: list[ModelSpec] = [
         note="Мультимодальная от Google. Понимает русский, видит картинки.",
     ),
     ModelSpec(
-        key="llava7b", title="LLaVA 1.6 Mistral 7B · Q4_K_M (зрение)",
-        repo="ggml-org/llava-v1.6-mistral-7b-gguf",
-        quant="Q4_K_M", size_gb=4.4, vision=True,
+        key="llava7b", title="LLaVA 1.6 Vicuna 7B · Q4_K_M (зрение)",
+        repo="second-state/Llava-v1.6-Vicuna-7B-GGUF",
+        filename="llava-v1.6-vicuna-7b-Q4_K_M.gguf",
+        size_gb=4.0, vision=True,
         note="Классическая vision-модель. Русский ограничен, но скриншоты понимает.",
     ),
     ModelSpec(
         key="minicpm3", title="MiniCPM-V 2.6 · Q4_K_M (зрение)",
         repo="openbmb/MiniCPM-V-2_6-gguf",
-        quant="Q4_K_M", size_gb=4.8, vision=True,
+        quant="Q4_K_M", size_gb=4.4, vision=True,
         note="9.6B-параметров, отлично читает текст на скриншотах, русский OK.",
     ),
     # --- КОДИНГ ---
@@ -241,7 +232,8 @@ CATALOG: list[ModelSpec] = [
     # --- БЕЗ ЦЕНЗУРЫ ---
     ModelSpec(
         key="dolphin3b", title="Dolphin 3 Llama 3.2 3B · Q4_K_M (без цензуры)",
-        repo="bartowski/Dolphin3-Llama3.2-3B-GGUF", quant="Q4_K_M", size_gb=2.0,
+        repo="bartowski/Dolphin3.0-Llama3.2-3B-GGUF",
+        filename="Dolphin3.0-Llama3.2-3B-Q4_K_M.gguf", size_gb=1.9,
         uncensored=True, note="Не отказывает по темам, выполняет любые команды.",
     ),
     ModelSpec(
@@ -288,10 +280,15 @@ def catalog_for(hw: Hardware, show_all: bool = False, only_uncensored: bool = Fa
 # ---------------------------------------------------------------------------
 
 def list_gguf_files(repo: str) -> list[tuple[str, float]]:
-    """[(имя файла, размер в ГБ)] всех gguf в репозитории."""
+    """[(имя файла, размер в ГБ)] всех gguf-моделей в репозитории.
+
+    Проекты зрения (mmproj) сюда не попадают — их ищут отдельные функции.
+    Пустой список означает и «репозиторий не найден», и «нет gguf-файлов»:
+    Hugging Face отвечает 401 на несуществующие репозитории так же, как на приватные.
+    """
     url = f"{HF_BASE}/api/models/{repo.strip().strip('/')}/tree/main"
     try:
-        response = requests.get(url, timeout=(10, 30))
+        response = requests.get(url, params={"recursive": "true"}, timeout=(10, 30))
         if response.status_code != 200:
             return []
         data = response.json()
@@ -300,12 +297,22 @@ def list_gguf_files(repo: str) -> list[tuple[str, float]]:
     files: list[tuple[str, float]] = []
     for item in data if isinstance(data, list) else []:
         name = str(item.get("path", ""))
-        if not name.lower().endswith(".gguf"):
+        if not name.lower().endswith(".gguf") or is_mmproj(name):
             continue
         size = float(item.get("size") or 0) / 1024**3
         files.append((name, size))
     files.sort(key=lambda pair: pair[1])
     return files
+
+
+def repo_exists(repo: str) -> bool:
+    """Есть ли репозиторий публично (401 у HF значит «нет такого» или приватный)."""
+    try:
+        return requests.get(
+            f"{HF_BASE}/api/models/{repo.strip().strip('/')}", timeout=(10, 20)
+        ).status_code == 200
+    except requests.RequestException:
+        return False
 
 
 def pick_filename(repo: str, spec: ModelSpec) -> str:
@@ -341,6 +348,11 @@ def _remote_size(url: str) -> int:
     except requests.RequestException:
         pass
     return 0
+
+
+def is_mmproj(name: str) -> bool:
+    """mmproj — это проектор изображений, а не языковая модель."""
+    return "mmproj" in name.lower()
 
 
 def _fetch_chunk(
@@ -492,17 +504,24 @@ def model_url(repo: str, filename: str) -> str:
 
 
 def _find_mmproj_for_model(model_path: Path) -> Path | None:
-    """Ищет mmproj-файл в той же папке что и модель."""
+    """Ищет проектор изображений в той же папке, что и модель.
+
+    Имена бывают обоих видов: `mmproj-model-f16.gguf` и
+    `Qwen2.5-VL-7B-Instruct-abliterated.mmproj-f16.gguf`.
+    """
     directory = model_path.parent
-    candidates = sorted(directory.glob("mmproj*.gguf"), key=lambda p: p.stat().st_size, reverse=True)
+    candidates = [
+        p for p in sorted(directory.glob("*.gguf"), key=lambda p: p.stat().st_size, reverse=True)
+        if is_mmproj(p.name)
+    ]
     return candidates[0] if candidates else None
 
 
 def find_mmproj(repo: str, quant: str = "Q4_K_M") -> str:
-    """Ищет mmproj-файл в репозитории: Q8_0 > F16 > любой."""
+    """Ищет mmproj-файл в репозитории: Q8_0 > F16 > любой (меньше качаем, качество то же)."""
     url = f"{HF_BASE}/api/models/{repo.strip().strip('/')}/tree/main"
     try:
-        response = requests.get(url, timeout=(10, 30))
+        response = requests.get(url, params={"recursive": "true"}, timeout=(10, 30))
         if response.status_code != 200:
             return ""
         data = response.json()
@@ -511,12 +530,11 @@ def find_mmproj(repo: str, quant: str = "Q4_K_M") -> str:
     candidates: list[str] = []
     for item in data if isinstance(data, list) else []:
         name = str(item.get("path", ""))
-        if "mmproj" in name.lower() and name.lower().endswith(".gguf"):
+        if name.lower().endswith(".gguf") and is_mmproj(name):
             candidates.append(name)
     if not candidates:
         return ""
-    # Приоритет: F16 (качество), Q8_0 (баланс), остальное.
-    for priority in ("F16", "Q8_0", "Q4_K_M", "Q4_K_S"):
+    for priority in ("Q8_0", "F16", "BF16", "Q4_K_M", "Q4_K_S"):
         for name in candidates:
             if priority in name.upper():
                 return name
@@ -532,21 +550,35 @@ def download_model(
 ) -> Path:
     filename = pick_filename(spec.repo, spec)
     if not filename:
+        if not repo_exists(spec.repo):
+            raise RuntimeError(
+                f"Репозиторий {spec.repo} не найден на Hugging Face — "
+                "он закрыт доступом или был переименован."
+            )
         raise RuntimeError(f"В репозитории {spec.repo} нет gguf-файла")
-    target = directory / filename
+    # Файл может лежать в подпапке репозитория — сохраняем плоским именем.
+    target = directory / Path(filename).name
     result = download_file(model_url(spec.repo, filename), target, threads, on_progress, cancel)
     # Для vision-моделей скачиваем mmproj (проектор изображений).
     if spec.vision:
         mmproj_name = find_mmproj(spec.repo, spec.quant)
-        if mmproj_name:
-            mmproj_target = directory / mmproj_name
-            if not mmproj_target.exists():
-                if on_progress:
-                    on_progress("Проектор зрения", 0.02, mmproj_name)
-                download_file(
-                    model_url(spec.repo, mmproj_name), mmproj_target,
-                    threads=4, on_progress=None, cancel=cancel,
+        if not mmproj_name:
+            if on_progress:
+                on_progress(
+                    "Внимание", 1.0,
+                    "проектор зрения не найден — модель будет видеть текст, но не скриншоты",
                 )
+            return result
+        mmproj_target = directory / Path(mmproj_name).name
+        if not mmproj_target.exists():
+            def mm_progress(stage: str, ratio: float, details: str = "") -> None:
+                if on_progress:
+                    on_progress(f"{stage} (зрение)", ratio * 0.15, details)
+
+            download_file(
+                model_url(spec.repo, mmproj_name), mmproj_target,
+                threads=4, on_progress=mm_progress, cancel=cancel,
+            )
     return result
 
 
@@ -856,3 +888,32 @@ LMSTUDIO_HOWTO = """Как скачать модель самому через L
 
 6. Где лежат файлы моделей
    C:\\Users\\<вы>\\.cache\\lm-studio\\models — можно копировать вручную."""
+
+
+def check_catalog() -> list[str]:
+    """Сверяет каталог с Hugging Face. Возвращает список проблем (пусто = всё живое).
+
+    Каталог хранит имена репозиториев вручную, а HF на несуществующий репо
+    отвечает 401 — так же, как на приватный. Без этой проверки битая позиция
+    выглядит для пользователя как «модель не скачивается».
+    """
+    problems: list[str] = []
+    for spec in CATALOG:
+        filename = pick_filename(spec.repo, spec)
+        if not filename:
+            why = "репозиторий не найден" if not repo_exists(spec.repo) else "нет gguf-файлов"
+            problems.append(f"{spec.key}: {spec.repo} — {why}")
+            continue
+        if spec.vision and not find_mmproj(spec.repo, spec.quant):
+            problems.append(
+                f"{spec.key}: {spec.repo} — не найден mmproj, скриншоты работать не будут"
+            )
+    return problems
+
+
+if __name__ == "__main__":
+    issues = check_catalog()
+    for line in issues:
+        print("ПРОБЛЕМА:", line)
+    print("Каталог в порядке." if not issues else f"Позиций с проблемами: {len(issues)}")
+
