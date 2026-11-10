@@ -15,7 +15,9 @@ import json
 import logging
 import math
 import os
+import random
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QRadialGradient, QTextOption
@@ -62,6 +64,7 @@ from chat_history import (
 )
 from commands import OfflineCommands
 from config import (
+    MODELS_DIR,
     OFFLINE_AUDIO_DIR,
     PROVIDERS,
     STT_ENGINES,
@@ -92,8 +95,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Фразы ассистента (вес — относительная вероятность выбора)
 # ---------------------------------------------------------------------------
-
-import random
 
 WAKE_PHRASES: list[tuple[str, int]] = [
     ("Вы меня вызывали, сэр?", 40),
@@ -783,6 +784,8 @@ class SettingsDialog(QDialog):
     local_progress = Signal(str, float, str)
     # Готово: (успех, сообщение).
     local_done = Signal(bool, str)
+    # Готово по запуску/остановке сервера: (успех, сообщение).
+    local_server_done = Signal(bool, str)
     # Ответ фонового потока со списком файлов репозитория.
     local_files_ready = Signal(object)
 
@@ -1248,7 +1251,7 @@ class SettingsDialog(QDialog):
 
         self.local_progress.connect(self._on_local_progress)
         self.local_done.connect(self._on_local_done)
-        self.local_done.connect(self._on_local_done_server)
+        self.local_server_done.connect(self._on_local_done_server)
         self.local_files_ready.connect(self._repo_files_ready)
         QTimer.singleShot(120, self._refresh_local_hw)
         return page
@@ -1533,10 +1536,18 @@ class SettingsDialog(QDialog):
                 self, "Локальные модели", "Сначала скачайте модель или укажите файл GGUF."
             )
             return
-        if not Path(path).exists():
-            QMessageBox.information(self, "Локальные модели", f"Файл не найден: {path}")
+        # Путь может быть относительно папки models — разворачиваем.
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self._models_dir() / path
+        if not candidate.exists():
+            QMessageBox.information(
+                self, "Локальные модели",
+                f"Файл не найден: {candidate}\nСкачайте модель или укажите полный путь.",
+            )
             return
         self.local_start_button.setEnabled(False)
+        self.local_ollama_button.setEnabled(False)
         self.local_status_label.setText(
             "Запускаю... при первой загрузке скачивается llama.cpp "
             "(~100 МБ, один раз)."
@@ -1544,21 +1555,24 @@ class SettingsDialog(QDialog):
         hw = self._local_hw_info()
         ctx = int(self.local_ctx_spin.value())
         port = int(self.local_port_spin.value())
+        resolved = str(candidate)
+        # Полный путь нужен слоту сервера: поле могло содержать имя без папки.
+        self._local_server_path = resolved
 
         def worker() -> None:
             try:
                 server = local_models.get_server()
                 server.port = port
                 server.start(
-                    path,
+                    resolved,
                     hw=hw,
                     ctx=ctx,
                     on_progress=lambda stage, ratio, details: self.local_progress.emit(stage, ratio, details),
                 )
             except Exception as exc:
-                self.local_done.emit(False, f"Сервер не запустился: {exc}")
+                self.local_server_done.emit(False, f"Сервер не запустился: {exc}")
                 return
-            self.local_done.emit(True, f"Локальная модель работает: {server.base_url}")
+            self.local_server_done.emit(True, f"Локальная модель работает: {server.base_url}")
 
         threading.Thread(target=worker, daemon=True, name="LocalServer").start()
 
@@ -1602,12 +1616,19 @@ class SettingsDialog(QDialog):
             return
         self.local_server_running = True
         # Владелец сам нажал «Запустить» — переводим Джарвиса на эту модель.
-        path = self.local_path_edit.text().strip()
+        path = getattr(self, "_local_server_path", "") or self.local_path_edit.text().strip()
+        if not path:
+            return
         self.settings.local_model_path = path
         self.settings.provider = "localgguf"
         self.settings.model = "local-model"
         self.settings.base_urls["localgguf"] = local_models.get_server().base_url
-        vision = " со зрением" if local_models._find_mmproj_for_model(Path(path)) else ""
+        vision = ""
+        try:
+            if local_models._find_mmproj_for_model(Path(path)):
+                vision = " со зрением"
+        except Exception as exc:
+            log.debug("vision check failed: %s", exc)
         self.local_status_label.setText(
             f"{message}{vision}. Модель выбрана основной — можно выключать интернет."
         )
@@ -2954,12 +2975,86 @@ class MainWindow(QMainWindow):
             log.exception("AI init failed")
             self.sig_tool_event.emit(f"LLM недоступен: {exc}")
 
+        # Автозапуск локальной модели: если провайдер localgguf, а сервер не
+        # отвечает — пытаемся поднять его автоматически (настраивается в
+        # настройках). Без этого при provider=localgguf все запросы падают
+        # с ConnectionRefused, что пользователь не понимает.
+        if self.ai and self.ai.provider.provider_id == "localgguf":
+            if local_models.get_server().running():
+                self.sig_tool_event.emit("Локальная модель запущена и готова.")
+            elif getattr(self.settings, "local_autostart", True):
+                self._autostart_local_server()
+            else:
+                self.sig_tool_event.emit(
+                    "Выбрана локальная модель, но сервер не запущен. "
+                    "Откройте Настройки → Локальные модели → «Запустить и подключить»."
+                )
+
         self.offline = OfflineCommands(self.tools, self.settings)
         self.tts = TTSManager(self.settings, on_status=self.sig_stt_status.emit)
         if not self.tts.available:
             self._log("Система", "Озвучка недоступна — проверьте настройки TTS.")
         else:
             self._prewarm_voice()
+
+    def _autostart_local_server(self) -> None:
+        """Поднимает локальную модель при старте, если она выбрана основной."""
+        path = (self.settings.local_model_path or "").strip()
+        if not path:
+            self.sig_tool_event.emit(
+                "Локальная модель не скачана — выбрана облачная."
+            )
+            self._fallback_from_local()
+            return
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = MODELS_DIR / path
+        if not candidate.exists():
+            self.sig_tool_event.emit(f"Модель не найдена: {candidate}")
+            self._fallback_from_local()
+            return
+
+        self.sig_tool_event.emit("Автозапуск локальной модели...")
+        hw = local_models.detect_hardware()
+        ctx = int(self.settings.local_ctx or 4096)
+        port = int(self.settings.local_port or 8077)
+        resolved = str(candidate)
+
+        def worker() -> None:
+            try:
+                server = local_models.get_server()
+                server.port = port
+                server.start(
+                    resolved, hw=hw, ctx=ctx,
+                    on_progress=lambda stage, ratio, details: self.sig_tool_event.emit(
+                        f"Локальная модель: {stage}"
+                    ),
+                )
+            except Exception as exc:
+                log.warning("local server autostart failed: %s", exc)
+                self.sig_tool_event.emit(f"Локальная модель не поднялась: {exc}")
+                self._fallback_from_local()
+                return
+            self.settings.base_urls["localgguf"] = server.base_url
+            self.sig_tool_event.emit("Локальная модель готова — можно без интернета.")
+
+        threading.Thread(target=worker, daemon=True, name="LocalAutostart").start()
+
+    def _fallback_from_local(self) -> None:
+        """Уводит провайдера с локальной модели, чтобы Джарвис не молчал."""
+        for candidate in ("pollinations", "gemini", "mistral"):
+            if candidate in PROVIDERS:
+                self.settings.provider = candidate
+                self.settings.model = PROVIDERS[candidate].get("default_model", "")
+                if self.ai:
+                    try:
+                        self.ai.reload()
+                    except Exception:
+                        log.debug("provider reload failed", exc_info=True)
+                self.sig_tool_event.emit(
+                    f"Переключаюсь на {PROVIDERS[candidate]['label']}."
+                )
+                return
 
     def _prewarm_voice(self) -> None:
         """Заранее синтезирует типовые фразы, чтобы первые ответы звучали сразу."""

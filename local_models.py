@@ -675,6 +675,16 @@ def ensure_runtime(
     return exe
 
 
+def _server_log_path() -> Path:
+    """Куда писать вывод llama-server — без этого причины падения невидимы."""
+    directory = runtime_dir().parent.parent / "logs"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        directory = Path(os.environ.get("TEMP", "."))
+    return directory / "llama-server.log"
+
+
 class LocalServer:
     """Запущенный llama-server: OpenAI-совместимый API на localhost."""
 
@@ -682,6 +692,7 @@ class LocalServer:
         self.port = port
         self.process: subprocess.Popen | None = None
         self.model_path: str = ""
+        self.log_path: str = ""
         self._lock = threading.Lock()
 
     @property
@@ -731,19 +742,39 @@ class LocalServer:
                 args.extend(["--mmproj", str(mmproj)])
             if on_progress:
                 on_progress("Запуск модели", 0.98, path.name)
+            # Вывод сервера пишем в файл: без него «не запустилось» невозможно
+            # разобрать — не хватило памяти, легли слои или нет CUDA-библиотек.
+            log_path = _server_log_path()
+            try:
+                log_handle = open(log_path, "wb")
+            except OSError:
+                log_handle = subprocess.DEVNULL
+
+            def _cleanup_handle(handle: object) -> None:
+                if isinstance(handle, int):
+                    return
+                try:
+                    handle.close()  # type: ignore[union-attr]
+                except OSError:
+                    pass
+
             self.process = subprocess.Popen(
                 args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            _cleanup_handle(log_handle)  # ребёнку хватает своего дескриптора
             self.model_path = str(path)
+            self.log_path = str(log_path) if not isinstance(log_handle, int) else ""
         deadline = time.time() + 180
         while time.time() < deadline:
             if self.process.poll() is not None:
+                code = self.process.returncode
                 raise RuntimeError(
-                    "локальный сервер завершился с ошибкой — модель не подошла "
-                    "или файл повреждён"
+                    f"llama-server закрылся (код {code}) — модель не подошла, "
+                    f"не хватило памяти или не хватает CUDA-библиотек.\n"
+                    f"Подробности: {getattr(self, 'log_path', '') or log_path}"
                 )
             if self.running():
                 if on_progress:

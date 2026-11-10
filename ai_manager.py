@@ -399,8 +399,7 @@ class OpenAICompatibleProvider(BaseProvider):
             )
         return {"text": "".join(content_parts).strip(), "tool_calls": calls}
 
-    @staticmethod
-    def _network_error_text(exc: Exception) -> str:
+    def _network_error_text(self, exc: Exception) -> str:
         """Таймаут — не «сети нет»: объясняем по-человечески и что делать."""
         text = str(exc)
         lowered = text.lower()
@@ -410,6 +409,16 @@ class OpenAICompatibleProvider(BaseProvider):
                 "Это не поломка связи: обычно помогает сменить модель на более "
                 "быструю (например, gemini-2.0-flash) или дождаться следующего "
                 f"окна бесплатного канала. Детали: {text[:200]}"
+            )
+        # Локальная модель живёт на 127.0.0.1: отказ означает, что сервер
+        # не запущен, а не что пропал интернет.
+        if self.provider_id == "localgguf" and (
+            "10061" in text or "refused" in lowered or "unable to connect" in lowered
+        ):
+            return (
+                "Локальная модель не запущена. Открой «Настройки» → «Локальные "
+                "модели» и нажми «Запустить и подключить», либо выбери облачный "
+                f"провайдер. Детали: {text[:160]}"
             )
         return f"Сеть недоступна или сервер не отвечает: {text[:250]}"
 
