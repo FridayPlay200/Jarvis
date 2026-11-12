@@ -44,6 +44,7 @@ class _StreamFallback(RuntimeError):
 # Системный промпт
 # ---------------------------------------------------------------------------
 
+# Длинный промпт облачной модели: подробные правила для агентского режима.
 _SYSTEM_PROMPT = """Ты — {name}, голосовой ассистент-агент, вдохновлённый Джарвисом из Iron Man.
 Ты работаешь на компьютере владельца под управлением {os_name} и полностью управляешь им
 через инструменты: программы, файлы, терминал, мышь, клавиатура, экран.
@@ -95,6 +96,24 @@ _SYSTEM_PROMPT = """Ты — {name}, голосовой ассистент-аг�
 - Имя пользователя: {user}
 """
 
+# Короткий промпт для ЛОКАЛЬНОЙ модели.
+# Причина: llama.cpp на CPU делает prefill со скоростью ~32 токена/с, и каждый
+# токен промпта стоит 30 мс. Длинный промпт (5000 токенов = 150 с) превращает
+# ответ в вечность. Короткий промпт (200 токенов = 6 с) делает модель usable.
+# Правила 4-15 (YouTube, скрипты, edit_file, look_at_screen и т.п.) локальная
+# модель всё равно не выполнит корректно — они нужны только облаку.
+#
+# ВАЖНО: в промпте НЕТ текущего времени. Сервер llama.cpp кэширует префикс
+# промпта: если префикс не меняется, префилл считается один раз и дальше
+# ответ приходит за секунды. Дата/время меняют префикс каждую минуту и
+# сбрасывают кэш — это стоило 90 секунд на каждый ответ.
+_SYSTEM_PROMPT_LOCAL = """Ты — {name}, голосовой помощник. Обращайся «сэр».
+{language_rule}
+Отвечай кратко: 1–2 предложения. Не выдумывай факты.
+Если просят что-то сделать на компьютере — вызывай инструменты, а не описывай план.
+Не спрашивай разрешений: владелец доверяет тебе полностью."""
+
+
 
 
 def _now() -> str:
@@ -135,6 +154,27 @@ class BaseProvider:
                 f"Для провайдера {self.cfg['label']} не задан API-ключ. "
                 "Откройте настройки и введите ключ."
             )
+
+    @staticmethod
+    def _fix_encoding(response: requests.Response) -> None:
+        """Лечит кракозябры от серверов без charset в Content-Type.
+
+        По RFC текстовые ответы без charset считаются ISO-8859-1, и requests
+        честно ставит latin-1. Локальный llama-server (SSE «text/event-stream»)
+        и часть облачных API отдают при этом UTF-8, из-за чего русский ответ
+        превращается в «Ð­ÑÐ¾ Ð¿Ð¾ÑÑÐµÐ±ÑÐµÑ». Если тело — валидный UTF-8,
+        переключаем декодирование на него.
+        """
+        encoding = (response.encoding or "").lower().replace("_", "-")
+        if encoding in ("utf-8", "utf8"):
+            return
+        if encoding and encoding not in ("iso-8859-1", "latin-1", "latin1", "windows-1252"):
+            return
+        try:
+            response.content.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError):
+            return
+        response.encoding = "utf-8"
 
     def chat(
         self,
@@ -257,6 +297,7 @@ class OpenAICompatibleProvider(BaseProvider):
         if response.status_code >= 400:
             raise AIError(self._format_http_error(response))
 
+        self._fix_encoding(response)
         try:
             data = response.json()
             message = data["choices"][0]["message"]
@@ -320,6 +361,10 @@ class OpenAICompatibleProvider(BaseProvider):
 
         if response.status_code >= 400:
             raise _StreamFallback(self._format_http_error(response))
+
+        # SSE приходит как «text/event-stream» без charset: requests выбрал бы
+        # ISO-8859-1 и русский ответ превратился бы в кракозябры.
+        self._fix_encoding(response)
 
         try:
             for raw_line in response.iter_lines(decode_unicode=True):
@@ -579,6 +624,7 @@ class AnthropicProvider(BaseProvider):
         if response.status_code >= 400:
             raise AIError(self._format_http_error(response))
 
+        self._fix_encoding(response)
         try:
             data = response.json()
             blocks = data.get("content", [])
@@ -758,10 +804,48 @@ class AIManager:
         return any(marker in lowered for marker in cls._CODING_MARKERS)
 
     def _schema_for(self, provider: BaseProvider) -> list[dict[str, Any]]:
-        """Схема инструментов под тип провайдера (openai/anthropic)."""
+        """Схема инструментов под тип провайдера.
+
+        Для ЛОКАЛЬНЫХ моделей: только ядро (10 инструментов из 28).
+        Причина: полная схема = 3000 токенов = 97 секунд prefill на CPU.
+        Ядро = 900 токенов = 30 секунд. 7B-модель плохо использует больше 10
+        инструментов и путается.
+        """
+        if provider.provider_id == "localgguf":
+            return self._local_tool_schema()
         if provider.kind == "anthropic":
             return self.tools.anthropic_schema()
         return self.tools.openai_schema()
+
+    def _local_tool_schema(self) -> list[dict[str, Any]]:
+        """Ядро инструментов для локальной модели."""
+        # Только самые нужные и простые
+        core = {"run_shell", "open_app", "type_text", "press_keys",
+                "mouse_action", "look_at_screen", "play_youtube",
+                "read_file", "write_file", "edit_file"}
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description.split(".")[0] + ".",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            k: {
+                                "type": v.get("type", "string"),
+                                "description": v.get("description", "")[:40],
+                            }
+                            for k, v in (tool.parameters.get("properties") or {}).items()
+                        },
+                        "required": tool.parameters.get("required") or [],
+                    },
+                },
+            }
+            for tool in self.tools._tools.values()
+            if tool.name in core
+        ]
+
 
     # ------------------------------------------------------------------
     def _system_prompt(self) -> str:
@@ -777,6 +861,13 @@ class AIManager:
             language_rule = (
                 "Отвечай на языке пользователя: на русский вопрос — по-русски, "
                 "на английский — по-английски."
+            )
+        # Для локальной модели короткий промпт: длинный = 5000 токенов = 2 минуты
+        # prefill на CPU. Короткий = 150 токенов = 5 секунд.
+        if self.provider.provider_id == "localgguf":
+            return _SYSTEM_PROMPT_LOCAL.format(
+                name=self.settings.assistant_name,
+                language_rule=language_rule,
             )
         return _SYSTEM_PROMPT.format(
             name=self.settings.assistant_name,

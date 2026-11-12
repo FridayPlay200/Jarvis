@@ -636,17 +636,99 @@ def _github_latest_release() -> tuple[str, dict[str, str]]:
     raise RuntimeError("на GitHub не нашлось Windows-сборки llama.cpp")
 
 
+def _cuda_backend_present(directory: Path) -> bool:
+    """В папке лежит CUDA-бэкенд llama.cpp (сам ggml-cuda.dll)."""
+    return (directory / "ggml-cuda.dll").exists()
+
+
+def _cuda_dlls_present(directory: Path) -> bool:
+    """Рядом с бэкендом есть рантайм-библиотеки NVIDIA.
+
+    llama.cpp отдаёт CUDA-сборку без cudart/cuBLAS — их выносят в отдельный
+    архив cudart-llama-bin-win-*.zip. Без них ggml-cuda.dll не загружается,
+    сервер поднимается молча и считает на CPU: префилл падает со 3600 до
+    30 токенов в секунду, то есть ответ вместо 0.4 с идёт 40-100 с.
+    """
+    return bool(list(directory.glob("cudart64_*.dll"))) and bool(
+        list(directory.glob("cublas64_*.dll"))
+    )
+
+
+def _fetch_cuda_dlls(
+    directory: Path,
+    assets: dict[str, str],
+    on_progress: Progress | None = None,
+    cancel: threading.Event | None = None,
+) -> bool:
+    """Докачивает архив cudart/cuBLAS. True — если библиотеки на месте."""
+    if _cuda_dlls_present(directory):
+        return True
+    candidates = [
+        name
+        for name in assets
+        if name.startswith("cudart-llama-bin-win") and name.endswith(".zip")
+    ]
+    if not candidates:
+        log.warning("в релизе llama.cpp нет архива cudart для Windows")
+        return False
+    asset = sorted(candidates)[-1]
+    try:
+        archive = directory / asset
+        if on_progress:
+            on_progress("CUDA-библиотеки", 0.0, asset)
+        download_file(assets[asset], archive, threads=6, on_progress=on_progress, cancel=cancel)
+        with zipfile.ZipFile(archive) as handle:
+            handle.extractall(directory)
+        archive.unlink(missing_ok=True)
+    except Exception as exc:  # без GPU просто медленнее — не роняем загрузку
+        log.warning("не удалось докачать CUDA-библиотеки: %s", exc)
+        return False
+    return _cuda_dlls_present(directory)
+
+
 def ensure_runtime(
     hw: Hardware,
     on_progress: Progress | None = None,
     cancel: threading.Event | None = None,
 ) -> Path:
     """Скачивает бинарник llama-server (CUDA, если есть карта, иначе CPU)."""
+    directory = runtime_dir()
     existing = server_binary(hw)
     if existing is not None:
+        # Существующая сборка годится, но CUDA-версия без библиотек NVIDIA
+        # работает на CPU — в этом случае докупаем недостающее.
+        if hw.cuda_available:
+            # Если CUDA-бэкенда нет (старая CPU-сборка) — обновляем до CUDA.
+            if not _cuda_backend_present(existing.parent):
+                log.info("Обновляем llama.cpp до CUDA-сборки (GPU обнаружен)")
+                try:
+                    _tag, assets = _github_latest_release()
+                    candidates = [
+                        name for name in assets if "bin-win-cuda" in name and "x64" in name
+                    ]
+                    if candidates:
+                        asset = sorted(candidates)[-1]
+                        archive = existing.parent / asset
+                        download_file(
+                            assets[asset], archive, threads=6,
+                            on_progress=on_progress, cancel=cancel,
+                        )
+                        with zipfile.ZipFile(archive) as handle:
+                            handle.extractall(existing.parent)
+                        archive.unlink(missing_ok=True)
+                        # ggml-cuda.dll появится, но нужны и cudart/cublas
+                        _fetch_cuda_dlls(existing.parent, assets, on_progress, cancel)
+                except Exception as exc:
+                    log.warning("не удалось обновить llama.cpp до CUDA: %s", exc)
+            # Если CUDA-бэкенд есть, но DLL нет — докачиваем только DLL
+            elif not _cuda_dlls_present(existing.parent):
+                try:
+                    _fetch_cuda_dlls(existing.parent, _github_latest_release()[1],
+                                     on_progress, cancel)
+                except Exception as exc:
+                    log.warning("проверка CUDA-библиотек не прошла: %s", exc)
         return existing
 
-    directory = runtime_dir()
     directory.mkdir(parents=True, exist_ok=True)
     tag, assets = _github_latest_release()
     if hw.cuda_available:
@@ -672,6 +754,11 @@ def ensure_runtime(
     exe = server_binary(hw)
     if exe is None:
         raise RuntimeError("после распаковки не найден llama-server.exe")
+
+    # CUDA-сборка бесполезна без cuBLAS/cuDART — докачиваем сразу, пока
+    # пользователь не ушёл в офлайн.
+    if hw.cuda_available and _cuda_backend_present(exe.parent):
+        _fetch_cuda_dlls(exe.parent, assets, on_progress, cancel)
     return exe
 
 
@@ -685,6 +772,66 @@ def _server_log_path() -> Path:
     return directory / "llama-server.log"
 
 
+def _pids_listening(port: int) -> list[int]:
+    """PID процессов, слушающих TCP-порт."""
+    try:
+        import psutil
+    except ImportError:
+        return []
+    pids: list[int] = []
+    try:
+        for conn in psutil.net_connections(kind="tcp"):
+            if conn.laddr and conn.status == "LISTEN" and int(conn.laddr.port) == port:
+                if conn.pid and conn.pid > 0:
+                    pids.append(int(conn.pid))
+    except Exception as exc:
+        log.debug("net_connections failed: %s", exc)
+    return sorted(set(pids))
+
+
+def _free_port(port: int) -> str:
+    """Снять порт с висящего llama-server прошлого запуска.
+
+    stop() помнит только свой Popen: если программу закрыли кнопкой или
+    процесс пережил UI, порт остаётся занят — новый сервер умирает с
+    «Address already in use». Убиваем только собственные серверы llama.cpp.
+    """
+    note = ""
+    for pid in _pids_listening(port):
+        if pid == os.getpid():
+            continue
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            name = (proc.name() or "").lower()
+            if "llama-server" not in name:
+                log.warning("порт %d занят %s (PID %d) — не трогаем", port, name, pid)
+                note = f"порт {port} занят приложением {name}"
+                continue
+            proc.terminate()
+            proc.wait(timeout=6)
+            note = f"остановлен зависший llama-server (PID {pid})"
+        except Exception as exc:
+            note = f"не удалось освободить порт {port}: {exc}"
+    return note
+
+
+def _detect_gpu(log_path: str, cuda_ready: bool = False) -> bool:
+    """Определить, использует ли сервер GPU.
+
+    При verbosity 3 (default) llama.cpp не пишет строку «offloaded N/M layers
+    to GPU», поэтому полагаемся на cuda_ready (ggml-cuda.dll + cudart/cublas
+    присутствуют). Если лог содержит offloaded-строку, она точнее.
+    """
+    try:
+        text = Path(log_path).read_text(errors="ignore") if log_path else ""
+    except OSError:
+        text = ""
+    if re.search(r"offloaded\s+\d+/\d+\s+layers to GPU", text):
+        return True
+    return cuda_ready
+
+
 class LocalServer:
     """Запущенный llama-server: OpenAI-совместимый API на localhost."""
 
@@ -693,6 +840,7 @@ class LocalServer:
         self.process: subprocess.Popen | None = None
         self.model_path: str = ""
         self.log_path: str = ""
+        self.gpu_active: bool = False
         self._lock = threading.Lock()
 
     @property
@@ -719,15 +867,27 @@ class LocalServer:
     ) -> None:
         hw = hw or detect_hardware()
         exe = ensure_runtime(hw, on_progress)
+        # CUDA-бэкенд бесполезен без библиотек NVIDIA: ggml-cuda.dll не загрузится,
+        # и -ngl 99 молча превратится в расчёт на CPU.
+        cuda_ready = (
+            hw.cuda_available
+            and _cuda_backend_present(exe.parent)
+            and _cuda_dlls_present(exe.parent)
+        )
+        if hw.cuda_available and not cuda_ready:
+            log.warning("CUDA-бэкенд недоступен: нет ggml-cuda.dll или cudart/cublas — считаем на CPU")
         with self._lock:
             self.stop()
+            stale = _free_port(self.port)
+            if stale:
+                log.info("порт %d: %s", self.port, stale)
             path = Path(model_path)
             if not path.exists():
                 raise RuntimeError(f"модель не найдена: {path}")
             if gpu_layers is None:
                 model_gb = path.stat().st_size / 1e9
-                fits_vram = hw.cuda_available and model_gb <= hw.vram_gb - 1.2
-                gpu_layers = 99 if fits_vram else (20 if hw.cuda_available else 0)
+                fits_vram = cuda_ready and model_gb <= hw.vram_gb - 1.2
+                gpu_layers = 99 if fits_vram else (20 if cuda_ready else 0)
             args = [
                 str(exe), "-m", str(path),
                 "--host", "127.0.0.1", "--port", str(self.port),
@@ -777,9 +937,13 @@ class LocalServer:
                     f"Подробности: {getattr(self, 'log_path', '') or log_path}"
                 )
             if self.running():
+                self.gpu_active = _detect_gpu(self.log_path, cuda_ready)
                 if on_progress:
                     vision_note = " + зрение" if mmproj else ""
-                    on_progress("Модель готова", 1.0, path.name + vision_note)
+                    device_note = "GPU" if self.gpu_active else "CPU"
+                    on_progress(
+                        f"Модель готова ({device_note})", 1.0, path.name + vision_note
+                    )
                 return
             time.sleep(1.0)
         raise RuntimeError("модель не успела загрузиться за 3 минуты")

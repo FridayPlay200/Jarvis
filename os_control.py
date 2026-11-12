@@ -462,6 +462,35 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
+    def lite_schema(self) -> list[dict[str, Any]]:
+        """Сжатая схема для ЛОКАЛЬНЫХ моделей.
+
+        Причина: llama.cpp на CPU читает 30 токенов промпта в секунду. Полная
+        схема из 28 инструментов = 3000 токенов = 100 секунд до первого ответа.
+        Короткие описания (только имя + что делает) = 800 токенов = 27 секунд.
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description.split(".")[0] + ".",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            k: {
+                                "type": v.get("type", "string"),
+                                "description": v.get("description", "")[:30],
+                            }
+                            for k, v in (tool.parameters.get("properties") or {}).items()
+                        },
+                        "required": tool.parameters.get("required") or [],
+                    },
+                },
+            }
+            for tool in self._tools.values()
+        ]
+
     def anthropic_schema(self) -> list[dict[str, Any]]:
         return [
             {
