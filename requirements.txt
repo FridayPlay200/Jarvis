@@ -17,9 +17,9 @@ piper-tts>=1.8         # нейроголос полностью офлайн (O
 # --- Распознавание речи (локально) ----------------------------------------
 faster-whisper>=1.0
 # Альтернатива Faster-Whisper — лёгкий Vosk (нужна модель vosk-model-small-ru):
-# vosk>=0.3.45
+vosk>=0.3.45
 # Облачный fallback, если локальный STT не установлен:
-# SpeechRecognition>=3.10
+SpeechRecognition>=3.10
 
 # --- Управление компьютером ------------------------------------------------
 pyautogui>=0.9.54
@@ -32,5 +32,5 @@ pycaw>=20240210; sys_platform == "win32"
 comtypes>=1.2; sys_platform == "win32"
 
 # --- Опционально: нейросетевой офлайн-голос Silero (тяжёлые зависимости) ---
-# torch>=2.0
-# torchaudio>=2.0
+torch>=2.0
+torchaudio>=2.0
